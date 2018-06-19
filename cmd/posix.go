@@ -42,17 +42,35 @@ const (
 	maxAllowedIOError = 5
 )
 
+// isValidVolname verifies a volname name in accordance with object
+// layer requirements.
+func isValidVolname(volname string) bool {
+	if len(volname) < 3 {
+		return false
+	}
+
+	if runtime.GOOS == "windows" {
+		// Volname shouldn't have reserved characters in Windows.
+		return !strings.ContainsAny(volname, `\:*?\"<>|`)
+	}
+
+	return true
+}
+
 // posix - implements StorageAPI interface.
 type posix struct {
-	ioErrCount int32 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
-	diskPath   string
-	pool       sync.Pool
-	connected  bool
+	// Disk usage metrics
+	totalUsed uint64 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
+	// Disk usage running routine
+	usageRunning int32 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
+	ioErrCount   int32 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
+
+	diskPath  string
+	pool      sync.Pool
+	connected bool
 
 	// Disk usage metrics
-	stopUsageCh        chan struct{}
-	totalUsage         uint64
-	usageCheckInterval time.Duration
+	stopUsageCh chan struct{}
 }
 
 // checkPathLength - returns error if given path name length more than 255
@@ -134,7 +152,6 @@ func isDirEmpty(dirname string) bool {
 		return false
 	}
 	defer f.Close()
-
 	// List one entry.
 	_, err = f.Readdirnames(1)
 	if err != io.EOF {
@@ -149,14 +166,15 @@ func isDirEmpty(dirname string) bool {
 }
 
 // Initialize a new storage disk.
-func newPosix(path string) (StorageAPI, error) {
+func newPosix(path string) (*posix, error) {
 	var err error
 	if path, err = getValidPath(path); err != nil {
 		return nil, err
 	}
 
-	st := &posix{
-		diskPath: path,
+	p := &posix{
+		connected: true,
+		diskPath:  path,
 		// 1MiB buffer pool for posix internal operations.
 		pool: sync.Pool{
 			New: func() interface{} {
@@ -164,16 +182,13 @@ func newPosix(path string) (StorageAPI, error) {
 				return &b
 			},
 		},
-		stopUsageCh:        make(chan struct{}),
-		usageCheckInterval: usageCheckInterval,
+		stopUsageCh: make(chan struct{}),
 	}
 
-	st.connected = true
-
-	go st.diskUsage()
+	go p.diskUsage(globalServiceDoneCh)
 
 	// Success.
-	return st, nil
+	return p, nil
 }
 
 // getDiskInfo returns given disk information.
@@ -281,8 +296,9 @@ func (s *posix) DiskInfo() (info DiskInfo, err error) {
 	return DiskInfo{
 		Total: di.Total,
 		Free:  di.Free,
-		Used:  atomic.LoadUint64(&s.totalUsage),
+		Used:  atomic.LoadUint64(&s.totalUsed),
 	}, nil
+
 }
 
 // getVolDir - will convert incoming volume names to
@@ -315,8 +331,8 @@ func (s *posix) checkDiskFound() (err error) {
 }
 
 // diskUsage returns du information for the posix path, in a continuous routine.
-func (s *posix) diskUsage() {
-	ticker := time.NewTicker(s.usageCheckInterval)
+func (s *posix) diskUsage(doneCh chan struct{}) {
+	ticker := time.NewTicker(globalUsageCheckInterval)
 	defer ticker.Stop()
 
 	usageFn := func(ctx context.Context, entry string) error {
@@ -328,10 +344,17 @@ func (s *posix) diskUsage() {
 			if err != nil {
 				return err
 			}
-			atomic.AddUint64(&s.totalUsage, uint64(fi.Size()))
+			atomic.AddUint64(&s.totalUsed, uint64(fi.Size()))
 			return nil
 		}
 	}
+
+	// Check if disk usage routine is running, if yes then return.
+	if atomic.LoadInt32(&s.usageRunning) == 1 {
+		return
+	}
+	atomic.StoreInt32(&s.usageRunning, 1)
+	defer atomic.StoreInt32(&s.usageRunning, 0)
 
 	if err := getDiskUsage(context.Background(), s.diskPath, usageFn); err != nil {
 		return
@@ -341,9 +364,16 @@ func (s *posix) diskUsage() {
 		select {
 		case <-s.stopUsageCh:
 			return
-		case <-globalServiceDoneCh:
+		case <-doneCh:
 			return
 		case <-ticker.C:
+			// Check if disk usage routine is running, if yes let it
+			// finish, before starting a new one.
+			if atomic.LoadInt32(&s.usageRunning) == 1 {
+				continue
+			}
+			atomic.StoreInt32(&s.usageRunning, 1)
+
 			var usage uint64
 			usageFn = func(ctx context.Context, entry string) error {
 				select {
@@ -358,10 +388,14 @@ func (s *posix) diskUsage() {
 					return nil
 				}
 			}
+
 			if err := getDiskUsage(context.Background(), s.diskPath, usageFn); err != nil {
+				atomic.StoreInt32(&s.usageRunning, 0)
 				continue
 			}
-			atomic.StoreUint64(&s.totalUsage, usage)
+
+			atomic.StoreInt32(&s.usageRunning, 0)
+			atomic.StoreUint64(&s.totalUsed, usage)
 		}
 	}
 }

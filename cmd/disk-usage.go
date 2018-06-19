@@ -18,11 +18,6 @@ package cmd
 
 import (
 	"context"
-	"time"
-)
-
-const (
-	usageCheckInterval = 12 * time.Hour // 12 hours
 )
 
 // getDiskUsage walks the file tree rooted at root, calling usageFn
