@@ -82,6 +82,7 @@ ENVIRONMENT VARIABLES:
      MINIO_CACHE_DRIVES: List of mounted drives or directories delimited by ";".
      MINIO_CACHE_EXCLUDE: List of cache exclusion patterns delimited by ";".
      MINIO_CACHE_EXPIRY: Cache expiry duration in days.
+     MINIO_CACHE_MAXUSE: Maximum permitted usage of the cache in percentage (0-100).
 
 EXAMPLES:
   1. Start minio gateway server for Azure Blob Storage backend.
@@ -100,6 +101,7 @@ EXAMPLES:
      $ export MINIO_CACHE_DRIVES="/mnt/drive1;/mnt/drive2;/mnt/drive3;/mnt/drive4"
      $ export MINIO_CACHE_EXCLUDE="bucket1/*;*.png"
      $ export MINIO_CACHE_EXPIRY=40
+     $ export MINIO_CACHE_MAXUSE=80
      $ {{.HelpName}}
 `
 
@@ -238,6 +240,8 @@ func s3MetaToAzureProperties(ctx context.Context, s3Metadata map[string]string) 
 			props.ContentMD5 = v
 		case k == "Content-Type":
 			props.ContentType = v
+		case k == "Content-Language":
+			props.ContentLanguage = v
 		}
 	}
 	return blobMeta, props, nil
@@ -291,6 +295,9 @@ func azurePropertiesToS3Meta(meta storage.BlobMetadata, props storage.BlobProper
 	}
 	if props.ContentType != "" {
 		s3Metadata["Content-Type"] = props.ContentType
+	}
+	if props.ContentLanguage != "" {
+		s3Metadata["Content-Language"] = props.ContentLanguage
 	}
 	return s3Metadata
 }

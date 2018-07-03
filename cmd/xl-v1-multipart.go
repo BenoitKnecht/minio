@@ -277,7 +277,7 @@ func (xl xlObjects) CopyObjectPart(ctx context.Context, srcBucket, srcObject, ds
 			}
 			return
 		}
-		// Close writer explicitly signalling we wrote all data.
+		// Close writer explicitly signaling we wrote all data.
 		if gerr := srcInfo.Writer.Close(); gerr != nil {
 			logger.LogIf(ctx, gerr)
 			return
@@ -375,8 +375,17 @@ func (xl xlObjects) PutObjectPart(ctx context.Context, bucket, object, uploadID 
 	}
 
 	// Fetch buffer for I/O, returns from the pool if not allocates a new one and returns.
-	buffer := xl.bp.Get()
-	defer xl.bp.Put(buffer)
+	var buffer []byte
+	switch size := data.Size(); {
+	case size == 0:
+		buffer = make([]byte, 1) // Allocate atleast a byte to reach EOF
+	case size < blockSizeV1:
+		// No need to allocate fully blockSizeV1 buffer if the incoming data is smaller.
+		buffer = make([]byte, size, 2*size)
+	default:
+		buffer = xl.bp.Get()
+		defer xl.bp.Put(buffer)
+	}
 
 	file, err := storage.CreateFile(ctx, data, minioMetaTmpBucket, tmpPartPath, buffer, DefaultBitrotAlgorithm, writeQuorum)
 	if err != nil {
@@ -473,7 +482,7 @@ func (xl xlObjects) PutObjectPart(ctx context.Context, bucket, object, uploadID 
 // to indicate where the listing should begin from.
 //
 // Implements S3 compatible ListObjectParts API. The resulting
-// ListPartsInfo structure is marshalled directly into XML and
+// ListPartsInfo structure is marshaled directly into XML and
 // replied back to the client.
 func (xl xlObjects) ListObjectParts(ctx context.Context, bucket, object, uploadID string, partNumberMarker, maxParts int) (result ListPartsInfo, e error) {
 	if err := checkListPartsArgs(ctx, bucket, object, xl); err != nil {
